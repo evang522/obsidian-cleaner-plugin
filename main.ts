@@ -15,10 +15,14 @@ import {
 
 interface MyPluginSettings {
 	intervalMinutes: number;
+	folderToSearch: string;
+	timeOfLastDialogue: number | null
 }
 
 const DEFAULT_SETTINGS: MyPluginSettings = {
-	intervalMinutes: 60
+	intervalMinutes: 60,
+	folderToSearch: './Scratch Inbox',
+	timeOfLastDialogue: null
 }
 
 export default class MyPlugin extends Plugin {
@@ -34,7 +38,7 @@ export default class MyPlugin extends Plugin {
 			return;
 		}
 
-		new CleanerModal(this.app, chosenFile as TFile).open();
+		new CleanerModal(this.app, chosenFile as TFile, this).open();
 	}
 
 	async onload() {
@@ -54,51 +58,39 @@ export default class MyPlugin extends Plugin {
 
 		// This adds a simple command that can be triggered anywhere
 		this.addCommand({
-				id: 'cleaner-open-clean-file-dialogue',
-				name: 'Obsidian Cleaner: Open clean file dialogue',
-				callback: this.triggerFileCleanDialogue.bind(this)
-			}
-		);
-		// This adds an editor command that can perform some operation on the current editor instance
-		// this.addCommand({
-		// 	id: 'sample-editor-command',
-		// 	name: 'Sample editor command',
-		// 	editorCallback: (editor: Editor, view: MarkdownView) => {
-		// 		console.log(editor.getSelection());
-		// 		editor.replaceSelection('Sample Editor Command');
-		// 	}
-		// });
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		// this.addCommand({
-		// 	id: 'open-sample-modal-complex',
-		// 	name: 'Open sample modal (complex)',
-		// 	checkCallback: (checking: boolean) => {
-		// 		// Conditions to check
-		// 		const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-		// 		if (markdownView) {
-		// 			// If checking is true, we're simply "checking" if the command can be run.
-		// 			// If checking is false, then we want to actually perform the operation.
-		// 			if (!checking) {
-		// 				new SampleModal(this.app).open();
-		// 			}
-		//
-		// 			// This command will only show up in Command Palette when the check function returns true
-		// 			return true;
-		// 		}
-		// 	}
-		// });
+			id: 'cleaner-open-clean-file-dialogue',
+			name: 'Obsidian Cleaner: Open clean file dialogue',
+			callback: this.triggerFileCleanDialogue.bind(this)
+		});
 
 		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new SampleSettingTab(this.app, this));
-		//
-		// // If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// // Using this function will automatically remove the event listener when this plugin is disabled.
-		// this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-		// 	console.log('click', evt);
-		// });
-		//
-		// // When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => this.triggerFileCleanDialogue(), this.settings.intervalMinutes * 60 * 1000));
+
+		this.registerInterval(
+			window.setInterval(() => {
+				if (!document.hasFocus()) {
+					return;
+				}
+
+				const now = Date.now();
+
+				if (this.settings.timeOfLastDialogue === null) {
+					this.triggerFileCleanDialogue();
+					return;
+				}
+
+				const timeSinceLastRunInMinutes = ((now - this.settings.timeOfLastDialogue) / 1000 / 60);
+				if (timeSinceLastRunInMinutes < this.settings.intervalMinutes) {
+					return;
+				}
+
+
+				this.triggerFileCleanDialogue()
+
+			},
+				60 * 1000 // we run this check every minute, meaning the interval can't be less than 1 min
+			)
+		);
 	}
 
 	onunload() {
@@ -112,31 +104,38 @@ export default class MyPlugin extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings);
 	}
+
+	async markTimeOfLastDialogue() {
+		this.settings.timeOfLastDialogue = Date.now();
+		await this.saveSettings();
+	}
 }
 
 class CleanerModal extends Modal {
 	private chosenFile: TFile;
+	private plugin: MyPlugin;
 
-	constructor(app: App, chosenFile: TFile) {
+	constructor(app: App, chosenFile: TFile, plugin: MyPlugin) {
 		super(app);
 		this.chosenFile = chosenFile;
+		this.plugin = plugin;
 	}
 
 	async onOpen() {
-		const {contentEl} = this;
+		const { contentEl } = this;
 		const content = (await this.app.vault.read(this.chosenFile));
 		contentEl.setText('Do you still need this file?');
 		contentEl.createEl('br');
 		contentEl.createEl('br');
-		contentEl.createEl('div', {text: this.chosenFile.path});
+		contentEl.createEl('div', { text: this.chosenFile.path });
 		contentEl.createEl('br');
 		contentEl.createEl('div', {
-				text: `"${content.slice(0, 1_000)}"`,
-				attr: {
-					style: 'color: grey',
-					height: '100px',
-				}
+			text: `"${content.slice(0, 1_000)}"`,
+			attr: {
+				style: 'color: grey',
+				height: '100px',
 			}
+		}
 		);
 		contentEl.createEl('br');
 
@@ -162,10 +161,12 @@ class CleanerModal extends Modal {
 				this.close();
 			})
 			.then(b => b.buttonEl.style.margin = '3px');
+
+		this.plugin.markTimeOfLastDialogue();
 	}
 
 	onClose() {
-		const {contentEl} = this;
+		const { contentEl } = this;
 		contentEl.empty();
 	}
 }
@@ -179,7 +180,7 @@ class SampleSettingTab extends PluginSettingTab {
 	}
 
 	display(): void {
-		const {containerEl} = this;
+		const { containerEl } = this;
 
 		containerEl.empty();
 
@@ -191,6 +192,17 @@ class SampleSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.intervalMinutes.toString())
 				.onChange(async (value) => {
 					this.plugin.settings.intervalMinutes = Number(value) || DEFAULT_SETTINGS.intervalMinutes;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Folders to search')
+			.setDesc('How often (in minutes) should the Cleaner prompter ask you if you want to remove an unwanted file?')
+			.addText(text => text
+				.setPlaceholder('./Scratch Inbox')
+				.setValue(this.plugin.settings.folderToSearch)
+				.onChange(async (value) => {
+					this.plugin.settings.folderToSearch = value || DEFAULT_SETTINGS.folderToSearch;
 					await this.plugin.saveSettings();
 				}));
 	}
